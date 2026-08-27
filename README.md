@@ -22,9 +22,6 @@ Zoreal.OAuth2 (this package)   your backend: exchange, verify, userinfo
 dotnet add package Zoreal.OAuth2
 ```
 
-Until the package is on nuget.org, reference the project directly or pack it
-locally with `dotnet pack`.
-
 .NET 8 or newer. Two dependencies: `Microsoft.IdentityModel.Tokens` and
 `System.IdentityModel.Tokens.Jwt`.
 
