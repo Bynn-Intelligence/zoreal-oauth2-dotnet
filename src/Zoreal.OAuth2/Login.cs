@@ -52,6 +52,24 @@ public sealed class Login
     /// </summary>
     public string? Acr => StringClaim("acr");
 
+    /// <summary>
+    /// A fresh liveness capture backed this login. The convenience spelling
+    /// of <see cref="Acr"/> == "zoreal.live"; for enforcement, pass the acr
+    /// requirement to <see cref="ZorealOAuth2Client.AuthenticateAsync"/> and
+    /// let verification refuse the token instead of checking after.
+    /// </summary>
+    public bool IsLive => Acr == "zoreal.live";
+
+    /// <summary>
+    /// Equal or stronger satisfies, on the client's ordering
+    /// (session &lt; device &lt; live). Unknown values satisfy nothing.
+    /// </summary>
+    public bool SatisfiesAcr(string required) =>
+        Acr is { } actual
+        && ZorealOAuth2Client.AcrOrder.TryGetValue(actual, out var actualRank)
+        && ZorealOAuth2Client.AcrOrder.TryGetValue(required, out var requiredRank)
+        && actualRank >= requiredRank;
+
     /// <summary>The authentication methods, e.g. hwk, face, user. Empty when absent.</summary>
     public IReadOnlyList<string> Amr =>
         Claims.TryGetValue("amr", out var value) && value.ValueKind == JsonValueKind.Array

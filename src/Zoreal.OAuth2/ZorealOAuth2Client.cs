@@ -37,6 +37,18 @@ public sealed class ZorealOAuth2Client : IDisposable
 
     public const string JwksCacheKey = "zoreal_oauth2_jwks";
 
+    /// <summary>
+    /// The assurance vocabulary, weakest to strongest. Verification accepts
+    /// equal or stronger: an RP requiring zoreal.device is satisfied by a
+    /// zoreal.live token, never the reverse.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int> AcrOrder = new Dictionary<string, int>
+    {
+        ["zoreal.session"] = 0,
+        ["zoreal.device"] = 1,
+        ["zoreal.live"] = 2,
+    };
+
     private const string ClientAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
     public string ClientId { get; }
@@ -66,16 +78,24 @@ public sealed class ZorealOAuth2Client : IDisposable
     /// <summary>
     /// The whole login, in order: exchange the code (with the PKCE verifier
     /// the browser SDK handed over), verify the ID token against the JWKS,
-    /// check the nonce when the caller has it. Returns a <see cref="Login"/>;
-    /// personal data is NOT fetched here, because the ID token never carries
-    /// it and not every caller wants it — <see cref="Login.UserinfoAsync"/>
-    /// fetches on first use.
+    /// check the nonce when the caller has it, and — when the caller passes
+    /// <paramref name="acr"/> — refuse a token whose assurance is below it.
+    /// Returns a <see cref="Login"/>; personal data is NOT fetched here,
+    /// because the ID token never carries it and not every caller wants it —
+    /// <see cref="Login.UserinfoAsync"/> fetches on first use.
+    ///
+    /// REQUESTING an assurance on the wire (the SDK's acr_values) is
+    /// advisory; the signed acr claim is the proof, and this parameter is
+    /// where a relying party that asked for a liveness check verifies it
+    /// actually happened. An RP that requires zoreal.live and never passes
+    /// <paramref name="acr"/> here has checked nothing.
     /// </summary>
     public async Task<Login> AuthenticateAsync(
-        string code, string codeVerifier, string? nonce = null, CancellationToken cancellationToken = default)
+        string code, string codeVerifier, string? nonce = null, string? acr = null,
+        CancellationToken cancellationToken = default)
     {
         var tokens = await ExchangeAsync(code, codeVerifier, cancellationToken).ConfigureAwait(false);
-        var claims = await VerifyIdTokenAsync(tokens.IdToken, nonce, cancellationToken).ConfigureAwait(false);
+        var claims = await VerifyIdTokenAsync(tokens.IdToken, nonce, acr, cancellationToken).ConfigureAwait(false);
         return new Login(this, claims, tokens.IdToken, tokens.AccessToken, tokens.Scope);
     }
 
@@ -150,15 +170,16 @@ public sealed class ZorealOAuth2Client : IDisposable
     }
 
     /// <summary>
-    /// ES256 against the provider's JWKS, plus iss, aud, exp and — when the
-    /// caller passes the nonce the SDK generated — the nonce binding. Returns
+    /// ES256 against the provider's JWKS, plus iss, aud, exp, the nonce
+    /// binding when the caller passes the nonce the SDK generated, and the
+    /// assurance floor when the caller passes <paramref name="acr"/>. Returns
     /// the verified claims. There is no RS256 fallback on purpose: ZOREAL
     /// signs nothing else, and accepting a second algorithm is how algorithm
     /// confusion starts. An unknown kid drops the cached JWKS and refetches
     /// once, which is how a key rotation is absorbed.
     /// </summary>
     public async Task<IReadOnlyDictionary<string, JsonElement>> VerifyIdTokenAsync(
-        string idToken, string? nonce = null, CancellationToken cancellationToken = default)
+        string idToken, string? nonce = null, string? acr = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(idToken))
             throw new VerificationException("no ID token to verify");
@@ -192,7 +213,28 @@ public sealed class ZorealOAuth2Client : IDisposable
             if (tokenNonce != nonce)
                 throw new VerificationException("the ID token nonce is not the one this login started with");
         }
+        if (!string.IsNullOrEmpty(acr))
+            VerifyAcr(claims, acr);
         return claims;
+    }
+
+    /// <summary>
+    /// Equal or stronger satisfies; anything else — weaker, missing, or a
+    /// value outside the vocabulary — is refused. An unknown REQUIREMENT is a
+    /// caller bug and says so plainly rather than failing every login.
+    /// </summary>
+    private static void VerifyAcr(IReadOnlyDictionary<string, JsonElement> claims, string required)
+    {
+        if (!AcrOrder.TryGetValue(required, out var requiredRank))
+            throw new ConfigurationException(
+                $"unknown required acr {required}; supported: {string.Join(", ", AcrOrder.Keys)}");
+
+        var actual = StringField(claims, "acr");
+        if (actual is not null && AcrOrder.TryGetValue(actual, out var actualRank) && actualRank >= requiredRank)
+            return;
+
+        throw new VerificationException(
+            $"the ID token says acr {(actual is null ? "(none)" : $"\"{actual}\"")}, below the required {required}");
     }
 
     /// <summary>
