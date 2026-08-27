@@ -11,7 +11,7 @@
 
   <PropertyGroup>
     <PackageId>Zoreal.OAuth2</PackageId>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <Authors>ZOREAL</Authors>
     <Company>Bynn Intelligence, Inc.</Company>
     <Description>Login with ZOREAL for .NET backends: exchanges the authorization code your frontend received from @zoreal/oauth2-react, verifies the ID token against the provider's JWKS, and reads personal claims from /userinfo.</Description>
