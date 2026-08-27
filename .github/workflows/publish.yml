@@ -1,0 +1,66 @@
+# Auto-release Zoreal.OAuth2 on every push to main, the family pattern set by
+# zoreal-oauth2-react: bump the patch in the csproj, run the tests, pack, push
+# to NuGet, push the bump commit and tag back to main, and cut the GitHub
+# release. The push back uses the default GITHUB_TOKEN, which does not
+# retrigger this workflow, and the bump commit carries [skip publish] as a
+# second guard.
+#
+# To ship without cutting a release (docs, CI tweaks), put [skip publish] in
+# the commit message.
+#
+# Needs: the NUGET_API_KEY secret (an API key from nuget.org scoped to push
+# Zoreal.OAuth2).
+name: Publish to NuGet
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: "!contains(github.event.head_commit.message, '[skip publish]')"
+    runs-on: ubuntu-latest
+    environment: nuget-publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          CSPROJ=src/Zoreal.OAuth2/Zoreal.OAuth2.csproj
+          CURRENT=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' "$CSPROJ")
+          NEW="${CURRENT%.*}.$(( ${CURRENT##*.} + 1 ))"
+          sed -i "s|<Version>${CURRENT}</Version>|<Version>${NEW}</Version>|" "$CSPROJ"
+          echo "version=${NEW}" >> "$GITHUB_OUTPUT"
+
+      - run: dotnet restore Zoreal.OAuth2.sln
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release
+
+      - run: |
+          git add src/Zoreal.OAuth2/Zoreal.OAuth2.csproj
+          git commit -m "Release v${{ steps.bump.outputs.version }} [skip publish]"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:main --follow-tags
+
+      - run: dotnet pack --no-build -c Release src/Zoreal.OAuth2/Zoreal.OAuth2.csproj
+      - run: dotnet nuget push "src/Zoreal.OAuth2/bin/Release/Zoreal.OAuth2.${{ steps.bump.outputs.version }}.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+      - run: gh release create "v${{ steps.bump.outputs.version }}" --title "v${{ steps.bump.outputs.version }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

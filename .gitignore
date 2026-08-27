@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+artifacts/
+*.nupkg
+*.snupkg
+
+# Test results
+TestResults/
+*.trx
+
+# IDE noise
+.vs/
+.idea/
+*.user
+*.suo
+.vscode/
+*.DotSettings.user
+
+# OS noise
+.DS_Store
