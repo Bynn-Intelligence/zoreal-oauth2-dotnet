@@ -25,6 +25,42 @@ dotnet add package Zoreal.OAuth2
 .NET 8 or newer. Two dependencies: `Microsoft.IdentityModel.Tokens` and
 `System.IdentityModel.Tokens.Jwt`.
 
+## Getting your credentials
+
+Everything `ZorealOAuth2ClientOptions` needs comes from a ZOREAL **asset**.
+
+1. Create an account at **https://zoreal.com** and open **Assets**.
+2. **Create an asset** — a *website* (a domain you own) or an *app bundle* (a
+   reverse-DNS bundle id). An asset is the thing users log in to; its token is
+   your `ClientId` and it looks like `ast_...`.
+3. On the asset, open the **OAuth2** tab and set:
+   - the **redirect URIs** and **JavaScript origins** your app uses (requests
+     from anything not registered are rejected — this is the core control),
+   - the **scopes** the client is allowed to request (see the catalogue below),
+   - your **client authentication**: generate a **client secret**
+     (`client_secret_basic`), or register a **JWKS** for `private_key_jwt`. A
+     public client authenticates with PKCE alone and no secret.
+4. A website asset must **verify its domain** (a DNS or meta-tag proof, shown in
+   the dashboard) before it can request personal-data scopes or sign users in;
+   the verified domain is what your users' `Sub` is pairwise against.
+
+The `ClientId` is public — it ships in your frontend. The client secret is not:
+keep it in your server's secret store (the `Zoreal:ClientSecret` above resolves
+through the standard configuration providers), never in the browser.
+
+### There is no test-identity sandbox — and that is deliberate
+
+ZOREAL **never issues fake or sandbox humans**: a pool of test identities would
+be a fraud vector against the exact thing the product proves. So you always
+authenticate **real** ZOREAL IDs.
+
+To develop and test, **create a free ZOREAL ID for yourself** (enrol in the
+ZOREAL ID app) and sign in with it. Mark your asset's environment **sandbox** in
+the dashboard while building — a sandbox asset may register `http://localhost`
+origins and redirect URIs that a production asset may not — and flip it to
+production when you ship. The identities are real either way; only the allowed
+origins differ.
+
 ## Quick start
 
 Build one client at boot and share it; it is thread-safe.
@@ -237,11 +273,182 @@ for your client, which is different from false), `Nationality`, `Claims`,
 `Portrait` — which stays null today: the profile.portrait scope is
 registrable but the provider does not serve the claim yet.
 
-Errors: `ConfigurationException`, `ExchangeException` (carries the provider's
-OAuth error code, its description verbatim, and the HTTP status),
-`VerificationException`, `UserinfoException`. A returning user matched on
-`Sub` can survive a caught `UserinfoException`; a signup that needs the email
-cannot. No error message ever carries a token value.
+## Scopes and claims
+
+Scopes are requested in the **frontend** (the SDK's `scope` string, always
+starting with `openid`), consented to by the holder, and pre-authorized on your
+asset. What each grants and where it is delivered:
+
+| Scope | Claims | Delivered in | Tier | Requires |
+|---|---|---|---|---|
+| `openid` | `sub`, `iss`, `aud`, `exp`, `iat`, `nonce`, `auth_time`, `acr`, `amr`, and the assurance block | ID token | A | any client |
+| `zoreal.age` | `age_over_13/16/18/21/65` booleans — only the thresholds you registered, never an age or birthdate | ID token | A | any client |
+| `zoreal.nationality` | `nationality` (ISO 3166-1 alpha-3) | ID token | A | any client |
+| `email` | `email`, `email_verified` | `/userinfo` | B | confidential client + verified domain |
+| `profile.name` | `name`, `given_name`, `family_name` | `/userinfo` | B | confidential client + verified domain |
+| `profile.birthdate` | `birthdate` (full ISO 8601 date) | `/userinfo` | B | confidential client + verified domain |
+| `profile.document` | `document_type`, `document_number`, `issuing_country`, `document_expires_on` | `/userinfo` | B | confidential client + verified domain |
+| `profile.portrait` | `portrait` (the chip's facial image; GDPR Article 9 data) | `/userinfo` | C | confidential client + verified domain — *registrable but not served yet* |
+
+- **Tier A** rides in the ID token and is available to every client, so the
+  no-backend browser button can use it — read it off the `Login` (`Sub`,
+  `AgeOver(n)`, `Nationality`). **Tier B and C** are personal data, served only
+  from `/userinfo` to a confidential client on a domain you have verified, and
+  never placed in a browser token — read them off the `Userinfo`.
+- **Age thresholds are a fixed set** — 13, 16, 18, 21, 65 — that you register on
+  the asset. `login.AgeOver(n)` returns `null` for a threshold you did not
+  register (no claim was minted), which is different from `false`.
+
+## Error reference
+
+`ExchangeAsync` / `AuthenticateAsync` throw `ExchangeException`, which carries
+the provider's own `OAuthError` code, its `Description` verbatim, and the HTTP
+`Status`. What you will actually see:
+
+| `OAuthError` | Cause | Retryable? |
+|---|---|---|
+| `invalid_grant` | The code is spent — unknown, expired (60s), already used, PKCE mismatch, or the asset's domain verification lapsed mid-flow | No. Start a **new** login; the code cannot be reused |
+| `invalid_request` | Client authentication failed — wrong secret, a bad `private_key_jwt` assertion, or `tls_client_auth` (not accepted at `/token` yet) | No. Fix your client configuration |
+| `unsupported_grant_type` | Something other than `authorization_code` reached `/token` | No. A bug |
+
+Errors that surface in the **frontend** instead, before your backend is
+involved (from the SDK's `onError` / `onNonOAuthError`), so handle them there:
+
+| Where | Code | Meaning |
+|---|---|---|
+| `/pair` | `invalid_scope` | A scope not on the asset's allowed list, or a Tier B scope from a public client |
+| `/pair` | `invalid_request` | Missing PKCE/nonce, an unverified sector, an unregistered `redirect_uri`, or an unknown `acr_values` |
+| `/pair` | `login_required` | `prompt=none` with no silent session to resume — the expected quiet outcome, not a failure |
+| pairing | `request_denied` | The holder declined in their ZOREAL ID app — **not an error to alarm on**; offer to try again |
+| pairing | `request_expired` | The pairing window elapsed, or a required liveness the device could not meet — offer to try again |
+
+This library's own exceptions all derive from `ZorealOAuth2Exception`, so a
+single `catch` can be the backstop while each type below drives the response:
+
+| Type | What it means |
+|---|---|
+| `ConfigurationException` | You built the client wrong, or asked to verify an acr outside the vocabulary — a bug in your code, not a bad token |
+| `ExchangeException` | The provider refused the code exchange; carries `OAuthError`, `Description` and `Status` (the table above) |
+| `VerificationException` | The ID token did not verify: signature, `iss`, `aud`, `exp`, `nonce`, or the acr floor |
+| `UserinfoException` | The `/userinfo` call failed |
+
+A returning user matched on `Sub` can survive a caught `UserinfoException`; a
+signup that needs the email cannot. No error message this library raises ever
+carries a token value.
+
+## The assurance block
+
+`login.Assurance` is the ID token's `zoreal` claim — an
+`IReadOnlyDictionary<string, JsonElement>?` describing the strength of the
+*identity* behind this login (distinct from `Acr`, which grades the *login
+event*). It is `null` when the claim is absent. Its keys and their value sets:
+
+| Key | Values | Meaning |
+|---|---|---|
+| `uniqueness` | `personal_number` \| `document` \| `none` | The anchor the holder is deduplicated on. `personal_number` (a national number from the chip) is strongest; `none` means no reliable anchor |
+| `verified_on` | `"YYYY-MM"` | The month the underlying document was verified. Quantised to a month on purpose — a day-precision date is a cross-site correlator |
+| `chip_liveness_proven` | `true` \| `false` | Whether the passport chip's active-authentication challenge was proven (a genuine chip, not a clone) |
+| `trust_tier` | `high` \| `standard` | `high` when `chip_liveness_proven`, else `standard` |
+| `key_protection` | `secure_enclave` \| `strongbox` \| `tee` \| `software` | How the holder's device key is protected. `software` means no hardware attestation |
+
+`Acr` grades *this login event*; the assurance block grades *the identity behind
+it*. A high-value flow usually wants both — `acr: "zoreal.live"` for fresh
+presence, and an assurance-block check for identity strength, e.g. requiring
+`uniqueness == "personal_number"` and `trust_tier == "high"`:
+
+```csharp
+var login = await zoreal.AuthenticateAsync(
+    body.Code, body.CodeVerifier, body.Nonce, acr: "zoreal.live");
+
+var assurance = login.Assurance;
+var strongIdentity =
+    assurance is not null
+    && assurance.TryGetValue("uniqueness", out var uniqueness)
+    && uniqueness.GetString() == "personal_number"
+    && assurance.TryGetValue("trust_tier", out var tier)
+    && tier.GetString() == "high";
+```
+
+## A complete example
+
+An ASP.NET Core endpoint, end to end — the shape a real integration takes.
+
+```csharp
+// Program.cs — the client, built once and shared (it is thread-safe).
+builder.Services.AddSingleton(new ZorealOAuth2Client(new ZorealOAuth2ClientOptions
+{
+    ClientId = builder.Configuration["Zoreal:ClientId"]!,          // ast_...
+    Auth = new ClientAuth.ClientSecretBasic(builder.Configuration["Zoreal:ClientSecret"]!),
+    Issuer = builder.Configuration["Zoreal:Issuer"] ?? "https://id.zoreal.com",
+}));
+
+// Your frontend's ZorealLogin onSuccess posts { code, codeVerifier, nonce } to
+// this route over your own TLS. Protect it with your normal CSRF / same-origin
+// controls, exactly as you would any login endpoint — the ZOREAL nonce protects
+// the token, not your route.
+app.MapPost("/auth/zoreal", async (
+    ZorealCallback body,
+    ZorealOAuth2Client zoreal,
+    AppDb db,
+    HttpContext http) =>
+{
+    Login login;
+    try
+    {
+        login = await zoreal.AuthenticateAsync(
+            body.Code,
+            body.CodeVerifier,
+            body.Nonce);
+            // acr: "zoreal.live"  // add for a step-up / high-value login
+    }
+    catch (ExchangeException)         // a spent code: the login must be restarted
+    {
+        return Results.Unauthorized();
+    }
+    catch (VerificationException)     // the token did not verify
+    {
+        return Results.Unauthorized();
+    }
+
+    // Match on Sub first; it is stable for your verified domain.
+    var user = await db.Users
+        .FirstOrDefaultAsync(u => u.Provider == "zoreal" && u.Uid == login.Sub);
+    if (user is null)
+    {
+        Userinfo info;
+        try
+        {
+            info = await login.UserinfoAsync();
+        }
+        catch (UserinfoException)
+        {
+            // Personal data was unreachable. Fatal for a signup that needs the
+            // email; a returning user matched on Sub above never reaches here.
+            return Results.Unauthorized();
+        }
+
+        // Claim an existing account that owns this verified email rather than
+        // colliding on the unique index; otherwise create one.
+        if (info.EmailVerified)
+            user = await db.Users.FirstOrDefaultAsync(u => u.Email == info.Email);
+        user ??= new User { Email = info.Email, FullName = info.Name };
+        user.Provider = "zoreal";
+        user.Uid = login.Sub!;
+        db.Users.Update(user);
+        await db.SaveChangesAsync();
+    }
+
+    // Establish YOUR session on a fresh principal. Sign-in regenerates the auth
+    // cookie; treat this as the fixation-defence boundary for your app.
+    var identity = new ClaimsIdentity(
+        new[] { new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()) },
+        CookieAuthenticationDefaults.AuthenticationScheme);
+    await http.SignInAsync(new ClaimsPrincipal(identity));
+    return Results.Ok(new { ok = true });
+});
+
+record ZorealCallback(string Code, string CodeVerifier, string? Nonce);
+```
 
 ## Things worth knowing before you integrate
 
@@ -257,9 +464,13 @@ cannot. No error message ever carries a token value.
   rotates every `sub` you have stored. Plan domain changes as a migration.
 - **ES256 only.** The provider signs with nothing else, and this library
   refuses other algorithms rather than negotiating.
-- **Always pass the nonce through.** The SDK generates it and gives it to
-  your frontend in `onSuccess`; without it your backend cannot tell a
-  substituted ID token from the real one.
+- **Always pass the nonce through, and protect your own endpoint too.** The SDK
+  generates the nonce and gives it to your frontend in `onSuccess`; passing it
+  to `AuthenticateAsync` lets this library confirm the ID token was minted for
+  *this* login rather than substituted. Two things it does **not** do: it is not
+  your endpoint's CSRF token (protect your `/auth/zoreal` route with ASP.NET
+  Core's normal antiforgery / same-origin defence), and PKCE — not the nonce —
+  is what proves whoever exchanges the code is whoever started the flow.
 - **Email is a deliberate choice.** It is a Tier B scope precisely because a
   shared email defeats the unlinkability the pairwise `sub` provides. Request
   it because you need it, not because the checkbox is familiar.
@@ -272,11 +483,9 @@ cannot. No error message ever carries a token value.
   to leak, and it is the method ZOREAL's certified-key path builds on.
   `tls_client_auth` is registrable but not accepted at the token endpoint
   yet, and this library says so instead of faking it.
-
-## Development against a local provider
-
-Point `Issuer` at your provider instance. The issuer value must match the `iss` inside the
-tokens exactly — it is compared, not normalized.
+- **The `Issuer` must match the token's `iss` exactly** — it is compared, not
+  normalized. Production is `https://id.zoreal.com`; override `Issuer` only when
+  pointing at a non-production provider you were explicitly given.
 
 ## The ZOREAL OAuth2 library family
 
