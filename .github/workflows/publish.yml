@@ -54,7 +54,7 @@ jobs:
           git add src/Zoreal.OAuth2/Zoreal.OAuth2.csproj
           git commit -m "Release v${{ steps.bump.outputs.version }} [skip publish]"
           git tag "v${{ steps.bump.outputs.version }}"
-          git push origin HEAD:main --follow-tags
+          git push origin HEAD:main "v${{ steps.bump.outputs.version }}"
 
       - run: dotnet pack --no-build -c Release src/Zoreal.OAuth2/Zoreal.OAuth2.csproj
       - run: dotnet nuget push "src/Zoreal.OAuth2/bin/Release/Zoreal.OAuth2.${{ steps.bump.outputs.version }}.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
