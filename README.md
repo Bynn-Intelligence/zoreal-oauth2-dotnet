@@ -503,6 +503,7 @@ record ZorealCallback(string Code, string CodeVerifier, string? Nonce);
 | zoreal-oauth2-go | github.com/Bynn-Intelligence/zoreal-oauth2-go | Go backend |
 | zoreal-oauth2-java | com.zoreal:oauth2 (Maven Central) | JVM backend |
 | zoreal-oauth2-dotnet | Zoreal.OAuth2 (NuGet) | .NET backend |
+| zoreal-oauth2-rust | zoreal-oauth2 (crates.io) | Rust backend |
 
 ## License
 
